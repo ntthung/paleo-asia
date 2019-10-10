@@ -6,7 +6,7 @@ library(cowplot)
 library(geosphere)
 # library(maptools)
 # library(rgdal)
-# library(sf)
+library(sf)
 library(data.table)
 library(doParallel)
 library(ldsr)
@@ -25,29 +25,3 @@ pasteLat <- function(x) {
 }
 
 theme_set(theme_cowplot(font_size = 10, font_family = "", line_size = 0.2))
-
-# Other utilities ---------------------------------
-
-# distance <- function(a, b) sqrt(sum((a-b)^2))
-# 
-# normalize <- function(x) {(x - min(x)) / (max(x) - min(x))}
-# 
-# rm_null <- function(x) x[!sapply(x, is.null)]
-# 
-# make_cormat <- function(dt, group.name, var.name, type = 'both') {
-#   
-#   sigma <- dt %>% 
-#     dcast(year ~ get(group.name), value.var = var.name, drop = FALSE) %>%
-#     .[, 2:ncol(.)] %>%
-#     cor(use = 'pairwise.complete.obs') %>% 
-#     melt() %>% 
-#     as.data.table() %>% 
-#     .[, .(v1 = as.character(Var1),
-#           v2 = as.character(Var2),
-#           value)]
-#   ans <- switch(type,
-#          'upper' = {sigma[v1 > v2]},
-#          'lower' = {sigma[v1 <= v2]},
-#          'both' = {sigma})
-#   ans
-# }

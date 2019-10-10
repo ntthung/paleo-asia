@@ -6,6 +6,8 @@ mada2 <- readRDS('data/mada2.RDS')       # Data.table format for easy wrangling
 # Streamflow
 instQ <- fread('data/instQ.csv')         # Annual streamflow
 instQxy <- fread('data/instQxy.csv')     # Coordinates and other metadata
+instQxyCN <- fread('data/instQxyCN.csv') # Separate metadata for Chinese stations. I cannot share their instrumental data due to restrictions, but I provided their reconstruction results.
+instQsummary <- fread('data/instQsummary.csv') # Summary statistics of log-transformed streamflow
 
 # Climate classification system (Knoben et al, 2018)
 kwf <- readRDS('data/kwf.RDS')

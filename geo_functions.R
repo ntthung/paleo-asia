@@ -1,3 +1,9 @@
+#' Euclidean distance between two points
+#' @param a Vector of coordinates for point a
+#' @param b Vector of coodinates for point b
+#' @return Euclidean distance
+distance <- function(a, b) sqrt(sum((a-b)^2))
+
 #' Get a grid cell containing the point of interest
 #' 
 #' Get the KWF cell that contains a point on the map
@@ -36,7 +42,7 @@ get_mada_by_kwf <- function(poi, mada.kwf.cells, kwf, kwf.max, geo.max, catchmen
   poiCell <- get_cell(poi, kwf)[1, c(arid, seas, snow)]
   # Calculate distances
   ans <- mada.kwf.cells[, .(kwf.dist = distance(c(arid, seas, snow), poiCell),
-                            geo.dist = distGeo(c(long, lat), poi) / 1000),
+                            geo.dist = geosphere::distGeo(c(long, lat), poi) / 1000),
                         by =  point
                         # Filter points
                       ][kwf.dist <= kwf.max & geo.dist <= geo.max, point]
