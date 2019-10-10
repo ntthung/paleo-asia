@@ -22,7 +22,7 @@ The script `for_paper.R` reproduces the figures in the main paper.
 source('for_paper.R')
 ```
 
-The script `for_SI.R` reproduces the figurse and table in the Supporting Information.
+The script `for_SI.R` reproduces the figures in the Supporting Information.
 
 ```{r}
 source('for_SI.R')
