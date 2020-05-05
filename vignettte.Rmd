@@ -4,7 +4,6 @@ author: "Hung Nguyen, Sean Turner, Brendan Buckley, and Stefano Galelli"
 output: 
   html_document: 
     highlight: tango
-    keep_md: yes
     number_sections: yes
     theme: journal
     toc: yes
