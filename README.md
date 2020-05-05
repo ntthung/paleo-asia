@@ -1,4 +1,4 @@
-Repository for reproducing the paper "Coherent streamflow variability in Monsoon Asia over the past eight centuries---links to oceanic drivers" (Nguyen et al, submitted to Geophysical Research Letters).
+Repository for reproducing the paper **"Coherent streamflow variability in Monsoon Asia over the past eight centuries---links to oceanic drivers"** (Nguyen *et al*, submitted to Geophysical Research Letters).
 
 # Reconstruction
 
@@ -18,4 +18,12 @@ source('KWF_ensemble_local.R')
 
 The script `for_paper.R` reproduces the figures in the main paper.
 
-The script `for_SI.R` reproduces the figurse and table in the Supporting Information.
+```{r}
+source('for_paper.R')
+```
+
+The script `for_SI.R` reproduces the figures in the Supporting Information.
+
+```{r}
+source('for_SI.R')
+```
