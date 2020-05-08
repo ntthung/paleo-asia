@@ -18,11 +18,12 @@ signif_area <- function(cor.dt, dx, dy) {
 #' @param signif.cor Where correlation is significant (p < 0.05)
 #' @param land An sf object representing the land area
 #' @param row.season Whether to layout the plot by row or by column
+#' @param limits Limits for the colour scale
 #' @return A plot, one row (or column) for each season, colour coded for correlation, and regions with significant correlations are encircled.
-plot_sst_cor <- function(sst.cor, signif.cor, land, title = NULL, row.season = TRUE) {
+plot_sst_cor <- function(sst.cor, signif.cor, land, row.season = TRUE, limits = NULL) {
   
   # To keep the colour scale symmetric
-  limits <- absRange(sst.cor$cor)
+  if (is.null(limits)) limits <- absRange(sst.cor$cor)
   p <- ggplot(sst.cor) +
     geom_raster(aes(long, lat, fill = cor)) +
     # Significance boxes
@@ -51,13 +52,13 @@ plot_sst_cor <- function(sst.cor, signif.cor, land, title = NULL, row.season = T
     geom_segment(aes(x = long + 1, xend = long + 1, y = lat - 1, yend = lat + 1), 
                  size = 0.1, colour = 'gray90',
                  data = sstLand[right == TRUE]) +
-    labs(x = NULL, y = NULL, title = title) +
+    labs(x = NULL, y = NULL) +
     theme_cowplot(font_size = 12) +
     theme(axis.text = element_blank(),
-          axis.ticks = element_blank(),
-          legend.position = 'bottom',
-          legend.key.width = unit(2, 'cm'),
-          legend.title = element_text(hjust = 1, vjust = 1)) +
+          axis.ticks = element_blank()) +
+    #       legend.position = 'bottom',
+    #       legend.key.width = unit(2, 'cm'),
+    #       legend.title = element_text(hjust = 1, vjust = 1)) +
     scale_x_continuous(expand = c(0, 0)) +
     scale_y_continuous(expand = c(0, 0)) +
     scale_fill_distiller(name = 'Correlation', palette = 'RdBu', direction = 1, limits = limits,
@@ -81,17 +82,20 @@ get_sst_cor <- function(Q, s, lag, varName) {
   
   # Lag from the point of view of streamflow
   # Lag = -1 means SST of last year and streamflow of this year
+  
+  commonYears <- intersect(Q$year, 1855:2012)
+  N <- length(commonYears)
   if (lag == 0) {
-    sstYear <- qYear <- 1855:2012
+    sstYear <- qYear <- commonYears
   } else if (lag == -1) {
-    sstYear <- 1855:2011
-    qYear <- 1856:2012
+    sstYear <- commonYears[1:(N-1)]
+    qYear <- commonYears[2:N]
   } else if (lag == -2) { # lag == -2
-    sstYear <- 1855:2010
-    qYear <- 1857:2012
+    sstYear <- commonYears[1:(N-2)]
+    qYear <- commonYears[3:N]
   } else { # lab == +1
-    sstYear <- 1856:2012
-    qYear <- 1855:2011
+    sstYear <- commonYears[2:N]
+    qYear <- commonYears[1:(N-1)]
   }
   river <- Q[1, river]
   lagChar <- if (lag == 0) '' else if (lag == 1) ' (+1)' else paste0(' (', lag, ')')
@@ -100,7 +104,7 @@ get_sst_cor <- function(Q, s, lag, varName) {
   
   ans <- DT[,
             {
-              ct <- cor.test(q, sst)
+              ct <- cor.test(q, sst, na.rm = TRUE)
               list(cor = ct$estimate, p.value = ct$p.value)
             },
             by = .(long, lat)
