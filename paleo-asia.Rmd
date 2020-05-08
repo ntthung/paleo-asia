@@ -19,16 +19,21 @@ We provide the data in the folder `data/`. Unfortunately, we can't give you the 
 
 R scripts that contain the intermediate computational steps and utility functions are provided in the folder `R/`. You may want to check them out before we proceed.
 
-We start by loading the necessary packages and utility functions.
+We start by loading the necessary packages and utility functions (if you don't already have some packages, please install them first).
 
 ```{r setup, message=FALSE, warning=FALSE}
 library(ldsr)                       # Streamflow reconstruction
 library(data.table)                 # Data wrangling
 library(ggplot2)                    # Plotting
-library(patchwork)                  # Arrange plots
-library(cowplot)                    # Arrange and annotate plots
-library(foreach)                    # Parallel computations
+library(patchwork)                  # Arranging plots
+library(cowplot)                    # Arranging and annotating plots
 library(magrittr)                   # Piping
+library(VSURF)                      # Input variable selection
+library(sf)                         # Mapping
+library(geosphere)                  # Geodetic distance calculation
+library(foreach)                    # Parallel computations
+library(doFuture)                   # Parallel computations
+library(future)                     # Parallel computations
 source('R/geo_functions.R')         # Geographical processing functions
 source('R/correlation_functions.R') # Correlation tools
 source('R/utils.R')                 # Other utilities
@@ -410,7 +415,7 @@ We will also check ensemble averaged models where we average over all p, over al
 
 Before we start, we need to make the cross-validation folds. 
 
-```{r make CV}
+```{r make CV folds}
 set.seed(100)
 cvPoints <- 
   instQ %>% 
@@ -432,9 +437,10 @@ Running the above line of code now only gives you 30 stations, so we provided th
 trans <- fread('data/transType.csv', key = 'ID')
 ```
 
-This code takes many hours to run, so you should only run it on a server (one that has 24-32 cores or so), or on a cluster.
+This code takes many hours to run, so you should only run it on a server (one that has 24-32 cores or so), or on a cluster. You can also reduce `num.restarts` to get results faster.
 
-```{r, eval=FALSE}
+```{r cv, eval=FALSE}
+num.restarts <- 1
 ldsScores <- 
   foreach(s = stationIDs,
           .packages = c('data.table', 'ldsr'),
@@ -475,7 +481,6 @@ ldsScores <-
                     },
                     by = .(kwf, p, rep)
                   ][, .(value = mean(value)), by = .(kwf, p, metric)]
-      out <- list(Ycv = Ycv, scores = scores)
       scores
     }
 ldsScores[, type := fifelse(kwf == 'Ensemble' & p == 'Ensemble', 
@@ -487,6 +492,7 @@ ldsScores[, p := factor(p, levels = c(pNames, 'Ensemble'))]
 ```
 
 ```{r}
+# Read pre-computed results
 ldsScores <- readRDS('results/ldsScores.RDS')
 ```
 
@@ -643,12 +649,27 @@ fhAnnotated <- fhWrap +
 fhAnnotated
 ```
 
+Zoom in to the instrumental period (Figure S5a).
+
+```{r, fig.width=6, fig.height=3}
+flow_history(ldsRec, instQmeta, trans, 
+             stdType = 'inst', instSummary = instQsummary,
+             startYear = 1950,
+             plotLower = FALSE, plotSegments = FALSE,
+             breaks = seq(1950, 2010, 10))
+```
+
 # SST correlation
 
 ```{r, include=FALSE}
+# Run this if you lost the parallel backend setup (e.g., because you've restarted R)
 doFuture::registerDoFuture()
 future::plan(future::multiprocess)
 ```
+
+## Overall correlations (1855--2012)
+
+Figure 6.
 
 ```{r}
 # SST data
@@ -660,25 +681,16 @@ sstLand <- readRDS('data/sstLand.RDS')
 outletStations <- c('Karad', 'C.2', 'Stung Treng', 'Datong')
 outletLookup <- instQmeta[name %in% outletStations]
 outletLookup[river == 'Karad', river := 'Krishna']
-outlet <- ldsRec[outletLookup]
+outlet <- ldsRec[outletLookup] %>% split(by = 'ID')
 # Calculate correlations
-# Previous year (only summer and fall)
+combi <- data.table(season = c('JJA', 'SON', 'DJF', 'MAM', 'JJA', 'SON', 'DJF'),
+                    lag    = c(   -1,    -1,     0,     0,    0,      0,     1)) %>% 
+  split(1:nrow(.))
 
-sstCorLast <- 
-  foreach(Q = split(outlet, by = 'ID'), .combine = rbind, .packages = 'data.table') %:%
-    foreach(season = c('JJA', 'SON'), .combine = rbind) %dopar%
-        get_sst_cor(Q, season, lag = -1, 'Q')
-# Current year
-sstCorPres <- 
-  foreach(Q = split(outlet, by = 'ID'), .combine = rbind) %:%
-    foreach(season = c('DJF', 'MAM', 'JJA', 'SON'), .combine = rbind) %dopar%
-        get_sst_cor(Q, season, lag = 0, 'Q')
-# Next year (only winter)
-sstCorNext <- 
-  foreach(Q = split(outlet, by = 'ID'), .combine = rbind) %dopar%
-        get_sst_cor(Q, 'DJF', lag = 1, 'Q')
-# Combine
-sstCor <- rbind(sstCorLast, sstCorPres, sstCorNext)
+sstCor <- 
+  foreach(Q = outlet, .combine = rbind, .packages = 'data.table') %:%
+    foreach(case = combi, .combine = rbind) %dopar%
+        get_sst_cor(Q, case$season, case$lag, 'Q')
 # Set factors to determine plot order
 sstCor[season == 'DJF (-1)', season := 'DJF (-2)']
 sstCor[season == 'DJF'     , season := 'DJF (-1)']
@@ -706,5 +718,99 @@ ggdraw(sstCorPlot + theme(plot.margin = margin(l = 0.7, r = 0.2, unit = 'cm'))) 
   draw_label('Ongoing ENSO', x = 0.02, y = 0.3, angle = 90, size = 10) +
   draw_text(paste0(letters[1:4], ')'), c(0.074, 0.275, 0.485, 0.69), 0.965, 
             fontface = 'bold', size = 11)
+```
+
+## Breaking down into sub-periods
+
+Figure S6, but without instrumental data for the Mekong and Yangtze.
+
+```{r}
+# Instrumental data
+outletInst <- instQ[outletLookup][year %in% 1955:2004] %>% split(by = 'ID')
+
+sstCorInst <- 
+  foreach(Q = outletInst, .combine = rbind, .packages = 'data.table') %:%
+    foreach(case = combi, .combine = rbind) %dopar%
+        get_sst_cor(Q, case$season, case$lag, 'Qa')
+
+# Set factors to determine plot order
+sstCorInst[season == 'DJF (-1)', season := 'DJF (-2)']
+sstCorInst[season == 'DJF'     , season := 'DJF (-1)']
+sstCorInst[season == 'DJF (+1)', season := 'DJF']
+sstCorInst$season %<>% factor(levels = c('JJA (-1)', 'SON (-1)', 'DJF (-1)', 
+                                     'MAM',      'JJA',      'SON',
+                                     'DJF'))
+sstCorInst$river %<>% factor(levels = c('Krishna', 'Chao Phraya', 'Mekong', 'Yangtze'))
+sstCorInst[, signif := p.value < 0.05]
+setkey(sstCorInst, long, lat)
+sstCorInst <- sstCorInst[sstxy, on = c('long', 'lat')]
+sstSignifAreaInst <- sstCorInst[, signif_area(.SD, 2, 2), by = .(season, river)]
+
+# Reconstruction, breaking into periods
+sstCor <- 
+  foreach(Q = outlet, .combine = rbind, .packages = 'data.table') %:%
+    foreach(case = combi, .combine = rbind) %:%
+      foreach(startYear = c(1855, 1905, 1955), .combine = rbind) %dopar% {
+        ans <- get_sst_cor(Q[between(year, startYear, startYear + 49)], 
+                           case$season, 
+                           case$lag,
+                           'Q')
+        ans[, period := startYear][]
+      }
+# Set factors to determine plot order
+sstCor[season == 'DJF (-1)', season := 'DJF (-2)']
+sstCor[season == 'DJF'     , season := 'DJF (-1)']
+sstCor[season == 'DJF (+1)', season := 'DJF']
+sstCor$season %<>% factor(levels = c('JJA (-1)', 'SON (-1)', 'DJF (-1)', 
+                                     'MAM',      'JJA',      'SON',
+                                     'DJF'))
+sstCor$river %<>% factor(levels = c('Krishna', 'Chao Phraya', 'Mekong', 'Yangtze'))
+sstCor[, signif := p.value < 0.05]
+setkey(sstCor, long, lat)
+sstCor <- sstCor[sstxy, on = c('long', 'lat')]
+sstSignifArea <- sstCor[, signif_area(.SD, 2, 2), by = .(season, river, period)]
+```
+
+```{r period sstCor, fig.width=16, fig.height=11.5}
+periodLab <- function(x, dx = 49) paste0('Reconstruction, ', x, '\u2013', x + dx)
+limits <- absRange(sstCor$cor)
+
+sstCorPlot <- 
+  plot_sst_cor(sstCorInst, sstSignifAreaInst, sstLand, limits = limits) + 
+  labs(title = 'Instrumental streamflow, 1955–2004') +
+  theme(legend.position = 'bottom', 
+        legend.key.width = unit(2, 'cm'),
+        strip.text.y = element_text(size = 9),
+        strip.text.x = element_text(size = 11),
+        strip.background.x = element_blank(),
+        axis.line = element_blank())
+legend <- get_legend(sstCorPlot)
+# Add empty space to the right to replace Mekong and Yangtze
+sstCorPlot2 <- plot_grid(sstCorPlot + theme(legend.position = 'none'), NULL, ncol = 2)
+
+instCorPlot <- ggdraw(sstCorPlot2 + 
+                        theme(plot.margin = margin(l = 0.7, r = 0.2, unit = 'cm'))) +
+  draw_label('Decaying ENSO', x = 0.02, y = 0.75, angle = 90, size = 10) +
+  draw_label('Ongoing ENSO', x = 0.02, y = 0.3, angle = 90, size = 10)
+
+pl <- lapply(c(1855, 1905, 1955), function(x) {
+  p <- plot_sst_cor(sstCor[period == x], sstSignifArea[period == x], sstLand, 
+                    limits = limits) +
+    labs(title = periodLab(x)) +
+    theme(strip.text.y = element_text(size = 9),
+          strip.text.x = element_text(size = 11),
+          strip.background.x = element_blank(),
+          axis.line = element_blank())
+  ggdraw(p +
+           theme(legend.position = 'none',
+                 plot.margin = margin(l = 0.7, r = 0.2, unit = 'cm'))) +
+    draw_label('Decaying ENSO', x = 0.02, y = 0.75, angle = 90, size = 10) +
+    draw_label('Ongoing ENSO', x = 0.02, y = 0.3, angle = 90, size = 10)
+})
+
+plots <- plot_grid(pl[[1]], pl[[2]], pl[[3]], instCorPlot, 
+                   ncol = 2, labels = paste0(letters[1:4], ')'))
+legend_plot <- plot_grid(NULL, legend, rel_widths = c(0.5, 1))
+plot_grid(plots, legend_plot, nrow = 2, rel_heights = c(15, 1))
 ```
 
