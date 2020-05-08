@@ -1,4 +1,4 @@
-lapplyrbind <- function(x, fun, ..., id) rbindlist(lapply(x, fun, ...), idcol = id)
+lapplyrbind <- function(x, fun, ..., id = NULL) rbindlist(lapply(x, fun, ...), idcol = id)
 
 absRange <- function(x) {
   r <- range(x)
