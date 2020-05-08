@@ -1,15 +1,15 @@
 flow_history <- function(recResults, metaData, trans,
-                         endYear = 2012, 
+                         startYear = 1200, endYear = 2012, breaks = NULL, 
                          what = 'flow',
                          stationNames = FALSE,
                          stdType = c('reconst', 'inst'), instSummary = NULL,
-                         plotLower = TRUE, plotGap = FALSE) {
+                         plotSegments = TRUE, plotLower = TRUE, plotGap = FALSE) {
   
   fh_period <- function(firstYear, lastYear, breaks, xPosition = 'bottom', 
                         showLegend = FALSE, showAreas = FALSE) {
     ggplot(rec[between(year, firstYear, lastYear)]) +
       geom_tile(aes(year, I(y_start), fill = Y, height = I(height)), 
-                    width = 1, colour = NA) +
+                width = 1, colour = NA) +
       {if (stationNames) geom_text(aes(1100, I(y_start), label = ID), 
                                    family = 'mono', size = 3, hjust = 0)} +
       geom_hline(aes(yintercept = top), data = regionSep[-1], colour = 'gray50', size = 0.3) +
@@ -39,9 +39,9 @@ flow_history <- function(recResults, metaData, trans,
       }
   }  
   
-  rec <- copy(recResults)
+  rec <- copy(recResults[between(year, startYear, endYear)])
   meta <- copy(metaData[order(code)])
-  rec <- rec[ID %in% metaData$ID & year <= endYear]
+  rec <- rec[ID %in% metaData$ID]
 
   meta[, height := 1]
   
@@ -72,13 +72,16 @@ flow_history <- function(recResults, metaData, trans,
                          xend = c(1258, 1375, 1425, 1453, 1641, 1768, 1796, 1816, 1878))
   
   limits <- absRange(rec$Y)
+  if (is.null(breaks)) breaks <- seq(1200, 2000, 50)
   
   if (plotLower) {
     overall <- fh_period(1200, endYear, 
-                         breaks = seq(1200, 2000, 50), xPosition = 'top', #rightMargin = 0,
+                         breaks = breaks, xPosition = 'top', #rightMargin = 0,
                          showLegend = TRUE, showAreas = TRUE) +
+    if (plotSegments) {
       geom_segment(aes(x = x, xend = xend, y = 0.125, yend = 0.125), size = 0.25,
                    data = segments, colour = 'steelblue')
+    }
     se  <- fh_period(1257, 1259, breaks = 1257, showAreas = TRUE)
     ak1 <- fh_period(1345, 1375, breaks = seq(1345, 1375, 5))
     ak2 <- fh_period(1401, 1425, breaks = seq(1405, 1425, 5))
@@ -100,9 +103,11 @@ flow_history <- function(recResults, metaData, trans,
   } else {
     segmentTop <- meta[1, {height/2 + y_start}]
     fh_period(1200, endYear, 
-              breaks = seq(1200, 2000, 50), xPosition = 'bottom',
+              breaks = breaks, xPosition = 'bottom',
               showLegend = TRUE, showAreas = TRUE) +
-      geom_segment(aes(x = x, xend = xend, y = segmentTop, yend = segmentTop), size = 0.3,
+      if (plotSegments) {
+        geom_segment(aes(x = x, xend = xend, y = segmentTop, yend = segmentTop), size = 0.3,
                    data = segments, colour = 'steelblue')
+      }
   }
 }
