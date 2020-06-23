@@ -214,7 +214,7 @@ Alternatively, you can read the pre-computed results.
 madaPoints <- readRDS('results/madaPoints.RDS')
 ```
 
-Let's now calculate the correlation between streamflow and the MADA for the selected stations on the Krishna and Chao Phraya (as in the paper), so that we can compare the significantly correlated areas with the search area, like in Figure 3. The file `R/correlation_functions.R` contains a utitilty function to determine the boundary lines of significant areas.
+Let's now calculate the correlation between streamflow and the MADA for the selected stations on the Krishna and Chao Phraya (as in the paper), so that we can compare the significantly correlated areas with the search area, like in Figure 3. The file `R/correlation_functions.R` contains a utility function to determine the boundary lines of significant areas.
 
 ```{r}
 # Correlation between PDSI and streamflow
@@ -337,7 +337,7 @@ corMat <-
   as.matrix(rownames = TRUE)
 ```
 
-We also need to setup the p parameter, and do some small preparations.
+We also need to set up the p parameter, and do some small preparations.
 
 ```{r}
 pRange <- c('0' = 0, '0.5' = 0.5, '2/3' = 2/3, '1' = 1, '1.5' = 1.5, '2' = 2)
