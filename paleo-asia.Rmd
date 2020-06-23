@@ -585,9 +585,9 @@ scorePlot
 
 # Streamflow history
 
-We now build the full reconstruction using the selected models. This code takes about 30 seconds, and will give you reconstruction results for all available stations. To get results for all stations, skip to the next chunk to read the pre-computed results.
+We now build the full reconstruction using the selected models. This code takes about 30 seconds (depending on your computer), and will give you reconstruction results for all 30 available stations. To get results for all 48 stations, skip to the next chunk to read the pre-computed results.
 
-```{r, eval=FALSE}
+```{r ldsFit, eval=FALSE}
 ldsFit <- 
   foreach(s = stationIDs, 
           .packages = c('data.table', 'ldsr'),
@@ -597,7 +597,7 @@ ldsFit <-
     kwfMax <- ldsChoice[s, kwf]
     u <- t(ensemblePCs[[s]][[kwfMax]][[p]])
     transform = trans[s, trans]
-    LDS_reconstruction(Qa, u, u, 1200, transform = transform, num.restarts = 20)
+    LDS_reconstruction(Qa, u, u, 1200, transform = transform, num.restarts = 50)
 }
 ```
 
@@ -605,7 +605,26 @@ ldsFit <-
 ldsFit <- readRDS('results/ldsFit.RDS')
 ```
 
-We also provide the full 30-member ensemble results in the file `results/ldsFitFull.RDS`, so you can inspect other models as well.
+We can also create the full 30-member ensembles using the following code, which takes about 15 minutes. Again, we provided pre-computed results for all 48 stations.
+
+```{r ldsFitFull, eval=FALSE}
+ldsFitFull <- 
+  foreach(s = stationIDs, 
+          .packages = c('data.table', 'ldsr'),
+          .final = function(x) setNames(x, stationIDs)) %:%
+    foreach(kwfMax = kwfNames,
+            .final = function(x) setNames(x, kwfNames)) %:%
+      foreach(p = pNames,
+              .final = function(x) setNames(x, pNames)) %dopar% {
+        Qa     <- instQ[s]
+        u <- t(ensemblePCs[[s]][[kwfMax]][[p]])
+        transform = trans[s, trans]
+        LDS_reconstruction(Qa, u, u, 1200, transform = transform, num.restarts = 50)
+              }
+ensembleRec <- lapplyrbind(ldsFitFull, lapplyrbind, lapplyrbind, '[[', 'rec')
+colnames(ensembleRec)[1:3] <- c('ID', 'kwf', 'p')
+# saveRDS(ensembleRec, 'results/ensembleRec.RDS') # Use RDS format as it is compressed
+```
 
 Now let's plot the reconstructed flow history (Figure 5). The plot function is provided in `R/flow_history.R` We need to normalize reconstructed flow with the observed mean and standard deviation, these are provided in the file `data/instQsummary.csv`.
 
