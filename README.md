@@ -1,3 +1,6 @@
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![DOI](https://zenodo.org/badge/255220088.svg)](https://zenodo.org/badge/latestdoi/255220088)
+
 Repository for reproducing the paper **"Coherent streamflow variability in Monsoon Asia over the past eight centuries---links to oceanic drivers"** (Nguyen *et al*, submitted).
 
 To run, first download the whole repo in your desktop, unzip to a folder, and switch your working directory to it.
