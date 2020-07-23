@@ -18,7 +18,9 @@ flow_history <- function(recResults, metaData, trans,
                          labels = regionSep$region,
                          expand = c(0, 0)) +
       scale_fill_gradient2(name = if (what == 'state') 'Catchment state' else 'Standardized streamflow',
-                           low = 'salmon4', mid = 'white', high = 'darkgreen', limits = limits) +
+                           low = '#6b473e', mid = 'snow1', high = '#125a0d', 
+                           breaks = seq(-3, 3, 1),
+                           limits = limits, na.value = 'gray90') +
       labs(x = NULL, y = 'Streamflow stations') +
       theme_cowplot(font_size = 10) +
       theme(axis.line.y = element_blank(),
@@ -84,8 +86,8 @@ flow_history <- function(recResults, metaData, trans,
     }
     se  <- fh_period(1257, 1259, breaks = 1257, showAreas = TRUE)
     ak1 <- fh_period(1345, 1375, breaks = seq(1345, 1375, 5))
-    ak2 <- fh_period(1401, 1425, breaks = seq(1405, 1425, 5))
-    kwe <- fh_period(1452, 1454, breaks = 1453)
+    ak2 <- fh_period(1401, 1425, breaks = seq(1405, 1420, 5))
+    kwe <- fh_period(1452, 1454, breaks = 1452)
     md  <- fh_period(1638, 1641, breaks = 1640)
     sp  <- fh_period(1756, 1768, breaks = c(1760, 1765))
     ei  <- fh_period(1790, 1796, breaks = c(1790, 1795))
