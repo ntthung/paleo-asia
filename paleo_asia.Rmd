@@ -1,0 +1,1273 @@
+---
+title: "Coherent streamflow variability in Monsoon Asia over the past eight centuries---links to oceanic drivers"
+author: "Hung Nguyen, Sean Turner, Brendan Buckley, and Stefano Galelli"
+output: 
+  html_document: 
+    highlight: tango
+    number_sections: yes
+    theme: journal
+    toc: yes
+    toc_float: yes
+    df_print: paged
+---
+
+# Introduction
+
+This repository contains the data and results to reproduce the paper by Nguyen et al., submitted to Water Resources Research. This vignette shows the step-by-step computations to reproduce the paper's results and figures. We also provide some additional details that may be of interest to some readers.
+
+We provide the data in the folder `data/`. Unfortunately, we can't give you the instrumental streamflow data for the Yangtze, Mekong, and Pearl Rivers, due to restrictions. Therefore, if you run the code here, you will not get results for these rivers for some computations that require instrumental data. We provide all results in the folder `results/`, including those for these rivers. 
+
+R scripts that contain the intermediate computational steps and utility functions are provided in the folder `R/`. You may want to check them out before we proceed. This Rmarkdown document is divided into sections, and the code chunks of each section work together so that you can run each section without having to run the preceding sections first. Most code chunks run independently, few requires preceding chunks in the same section be run first.
+
+To execute this repository, you will need to install some packages. Run this line below once if you haven't got these packages.
+
+```{r install packages, eval=FALSE}
+install.packages(c('ldsr', 'patchwork', 'cowplot', 'VSURF', 
+                   'sf', 'geosphere', 'doFuture', 'dplR', 'glue'))
+```
+
+The following code chunk sets up the environment and reads the data.
+
+```{r setup, message=FALSE, warning=FALSE}
+# Set up the environment
+source('R/init.R')                  # Packages and utilities (functions, variables)
+source('R/geo_functions.R')         # Geographical processing functions
+source('R/correlation_functions.R') # Correlation tools
+source('R/plot_metric_map.R')       # For Figure 4
+source('R/flow_history.R')          # For Figures 5 and S5
+options(digits = 4)                 # For concise printing
+
+# Read data
+instQmeta <- fread('data/instQ_meta.csv', key = 'ID') # Streamflow metadata
+instQ <- fread('data/instQ.csv', key = 'ID')          # Instrumental streamflow
+mada2mat <- readRDS('data/mada2mat.RDS')              # MADA v2
+mada2xy <- readRDS('data/mada2xy.RDS')                # Coordinates of MADA v2 grid points
+kwf <- readRDS('data/kwf.RDS')                        # KWF system
+
+# Hyperparameters
+kwfRange <- c('0.10' = 0.1, '0.15' = 0.15, '0.20' = 0.2, '0.25' = 0.25, '0.30' = 0.3)
+pRange <- c('0' = 0, '0.5' = 0.5, '2/3' = 2/3, '1' = 1, '1.5' = 1.5, '2' = 2)
+# Assign names to vector so as to have named lists in lapply()
+## IDs of all stations
+names(stationIDs) <- stationIDs <- instQmeta$ID 
+## IDs of available stations (exc. Mekong, Yangtze, and Pearl)
+names(availIDs) <- availIDs <- unique(instQ$ID) 
+## Hyperparameters
+names(kwfNames) <- kwfNames <- names(kwfRange)
+names(pNames) <- pNames <- names(pRange)
+
+# Transformation type 
+trans <- fread('data/transform_type.csv', key = 'ID')
+
+# Count the number of stations in each region
+regionCount <- instQmeta[order(code), .N, by = region]
+regionCount$end <- regionCount$N[1] + 0.5
+regionCount$stt <- 0.5
+for (i in 2:6) {
+  regionCount$stt[i] <- regionCount$end[i - 1]
+  regionCount$end[i] <- regionCount$end[i - 1] + regionCount$N[i]
+}
+regionCount[, mid := (stt + end) / 2]
+
+# Selected stations
+## 4 in the paper
+s4 <- c('IN_0000061', 'TH_0000178', 'TH_0000156', 'CN_0000192')
+## Exclude Mekong and Yangtze
+s2 <- c('IN_0000061', 'TH_0000178')                             
+## Use another two to replace Mekong and Yangtze
+s2b <- c('IN_0000061', 'TH_0000178', 'PH_0000006', 'MN_0000002') 
+
+# SST data
+sstFull <- readRDS('data/seasonal_sst.RDS')
+sstLand <- readRDS('data/sstLand.RDS')[lat %between% c(-60, 60)]
+sstxy <- fread('data/sstxy.csv')
+# Make lagged SST
+sst1 <- sstFull[season %in% c('JJA', 'SON') & year %in% 1855:2011
+              ][, year := year + 1
+              ][, season := paste0(season, ' (-1)')]
+sst0 <- sstFull[year %in% 1856:2012]
+sst <- rbind(sst1, sst0)
+remove(sstFull, sst0, sst1)
+
+# Maps
+bgMap <- sf::st_read('data/geo/mada_coastlines.gpkg', quiet = TRUE)
+```
+
+There is also the script `R/read-raw-data.R` that is available for inspection. Parts of that code reads the raw data from the GSIM; you can use that part if you have GSIM on your computer.
+
+Some code chunks require parallel computations (those involving `foreach()`). You will need tu run the chunk named `parallel` first to set up the parallel backend.
+
+Finally, the file `all_time_series.Rmd` provides code and figures similar to S6 and S7, but for all stations.
+
+# Data
+
+First, let's explore the data sets.
+
+## Streamflow data
+
+### Metadata
+
+Table S2.
+
+```{r, rows.print=21}
+instQmeta[order(code)]
+```
+
+**Note.** In the paper, we omitted the leading zeros in station IDs due to space constraints. Here we are using the full station IDs. The column code is an encoding for plotting, which will be useful in figures where stations are grouped by region, such as Figure 5.
+
+### Upstream retention time
+
+We have calculated the total upstream reservoir capacity of each station from QGIS and stored in the file `data/reservoir_volumes.csv`. We have also calculated the mean annual flow, converted it to million m$^3$/year, and stored in the file `data/mean_flow_volume.csv`. Now, we calculate upstream retention time as the ratio between the total upstream reservoir capacity and the mean annual flow. We plot the results to reproduce **Figure 1b**.
+
+```{r, fig.width=8, fig.height=4}
+resVol <- fread('data/reservoir_volumes.csv')
+flowVol <- fread('data/mean_flow_volume.csv')
+urt <- resVol[flowVol, on = 'ID', nomatch = NULL, # Merge
+            ][, urt := resVol / QV                # Calculate ratio
+            ][order(urt, decreasing = TRUE)       # Sort by URT
+            ][, ID := factor(ID, levels = ID)]    # To maintain plot order
+ggplot(urt, aes(ID, urt)) +
+  geom_bar(aes(fill = region), stat = 'identity', colour = 'black', width = 1, size = 0.1) +
+  scale_x_discrete(expand = c(0, 0), labels = trim_ID) +
+  scale_y_continuous(expand = c(0, 0), breaks = seq(0, 1, by = 0.1), limits = c(0, 1)) +
+  scale_fill_manual(name = 'Region', values = regionFillPal) +
+  labs(x = NULL, y = 'Upstream retention time [years]') +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 8),
+        axis.text.y = element_text(hjust = 0),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        legend.position = 'top',
+        panel.background = element_blank(),
+        panel.grid.major.y = element_line(colour = 'gray90', size = 0.1),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank())
+```
+
+### Record length
+
+Number of non-missing years for each station (**Figure S2**).
+
+```{r, fig.width=6, fig.height=3}
+instN <- fread('data/number_non_missing_years.csv')
+ggplot(instN) +
+  geom_bar(aes(x = N), fill = blues9[6]) +
+  labs(x = 'Number of non-missing years', y = 'Number of stations') +
+  scale_x_binned(breaks = seq(35, 120, 5), expand = c(0, 1)) +
+  scale_y_continuous(breaks = seq(0, 20, 2), expand = c(0, 0)) +
+  theme(axis.line = element_blank(),
+        panel.background = element_blank(),
+        panel.grid.major.y = element_line(colour = 'white'),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.ontop = TRUE)
+```
+
+### Density
+
+**Figure S3**, without the Yangtze, Mekong, and Pearl. 
+
+Rescale the untransformed and log-transformed flow, then compare the two densities.
+
+```{r, fig.width=8, fig.height=6}
+transQ <- instQ[, .(None = standardize(Qa), Log = standardize(log(Qa))), by = ID]
+ggplot(transQ) +
+  stat_density(aes(x = None, colour = 'No transformation'),
+               position = 'identity', geom = 'line', na.rm = TRUE, size = 0.5) +
+  stat_density(aes(x = Log, colour = 'Log-tranformed'),
+               position = 'identity', geom = 'line', na.rm = TRUE, size = 0.5) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_colour_manual(name = NULL, 
+                      values = c('steelblue', 'darkorange')) +
+  facet_wrap(vars(ID), scales = 'free_y', ncol = 8) +
+  labs(x = 'z-score', y = 'Density') +
+  theme_classic() +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        strip.background = element_blank(),
+        legend.position = c(0.75, 0.05),
+        legend.key.width = unit(1.5, 'cm'))
+```
+
+## MADA v2
+
+In case you are not familiar with the MADA, below is a plot of the grid. For background map, we also provide the coastlines of the Monsoon Asia region in the file `data/mada-coastline.gpkg`. We use the package `sf` to read this file.
+
+```{r, fig.width=6, fig.height=5}
+ggplot(mada2xy) + 
+  geom_point(aes(long, lat), shape = '+', colour = 'steelblue') +
+  geom_sf(data = bgMap) +
+  labs(x = NULL, y = NULL) +
+  coord_sf(expand = FALSE) +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+```
+
+All MADA grid points end in 2012. We now plot their starting years. This is Figure S4.
+
+```{r, fig.width=7, fig.height=4.5}
+mada2startYear <- readRDS('data/mada2start.RDS')
+ggplot(mada2startYear) +
+  geom_raster(aes(long, lat, fill = year)) +
+  scale_fill_binned(name = 'First year of record', type = 'viridis') +
+  scale_x_continuous(expand = c(0, 0), labels = pasteLong) +
+  scale_y_continuous(expand = c(0, 0), labels = pasteLat) +
+  labs(x = NULL, y = NULL) +
+  coord_quickmap() +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+```
+
+Most grid points start before 1200. A few grid points that start after 1200 are ignored.
+
+# Reconstruction
+
+## Climate-informed input variable selection
+
+The main idea is to select MADA grid points that are in a similar climate to the streamflow station of interest. We characterize climate using the KWF hydroclimate system.
+
+### KWF hydroclimate system
+
+We provide the hydroclimate classification system in the file `data/kwf.RDS`, only for the Monsoon Asia domain.
+
+```{r}
+head(kwf)
+```
+
+`long` and `lat` are the coordinates of the grid point. `x1`, `x2`, `y1`, `y2` are the four corners of the grid cell, which will be used to determine the cell that contains any point on Earth. `arid`, `seas`, and `snow` are the three KWF indices: aridity, seasonality, and snow fraction. `col` is the RGB colour created from the three indices. 
+Let's visualize this data set.
+
+```{r, fig.width=6, fig.height=5}
+ggplot(kwf) +
+  geom_raster(aes(long, lat, fill = I(col))) +
+  labs(x = NULL, y = NULL) +
+  scale_x_continuous(labels = pasteLong) +
+  scale_y_continuous(labels = pasteLat) +
+  coord_quickmap(expand = FALSE) +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+```
+
+With this, we can identify the KWF cell of each MADA grid cell, so as to determine its climate. The MADA v2 has resolution $1^\circ \times 1^\circ$ and the KWF has resolution $0.5^\circ \times 0.5^\circ$. The MADA grid lies nicely on the KWF grid, so all we need to do is a simple left joint.
+
+```{r}
+madaKwfCells <- mada2xy[kwf, on = c('long', 'lat'), nomatch = NULL
+                      ][, .(point, long, lat, arid, seas, snow)]
+head(madaKwfCells)
+```
+
+### Select MADA grid points
+
+From here on, we'll need to use lots of parallel computing, so let's set this up.
+
+```{r parallel, eval=FALSE}
+# Parallel
+doFuture::registerDoFuture()
+future::plan(future::multiprocess)
+```
+Now we can select MADA grid points based on the KWF distance, using `get_mada_by_kwf()`. This will take a few seconds on a normal desktop. 
+
+```{r, eval=FALSE}
+madaPoints <- foreach(s = stationIDs, .final = function(x) setNames(x, stationIDs)) %dopar%
+  lapply(kwfRange, function(kwfMax) 
+    get_mada_by_kwf(instQmeta[s, c(long, lat)], madaKwfCells, kwf, kwfMax, 2500))
+```
+
+Alternatively, you can read the pre-computed results.
+
+```{r}
+madaPoints <- readRDS('results/madaPoints.RDS')
+```
+
+Let's now calculate the correlation between streamflow and the MADA for the selected stations on the Krishna and Chao Phraya (as in the paper), so that we can compare the significantly correlated areas with the search area, like in Figure 3. The file `R/correlation_functions.R` contains a utility function to determine the boundary lines of significant areas.
+
+```{r}
+# Correlation between PDSI and streamflow
+s2 <- stationIDs[c('IN_0000061', 'TH_0000178')]
+row.names(mada2mat) <- 1200:2012
+## Convert MADA to long format
+madaLong <- 
+  mada2mat %>% 
+  as.data.table(keep.rownames = 'year') %>% 
+  melt(id.vars = 'year', variable.name = 'point', value.name = 'pdsi') %>% 
+  .[, year := as.numeric(year)]
+## Merge the MADA with the instrumental data and calculate correlations for each combination
+subCor <- merge(madaLong, instQ[s2], by = 'year')[, 
+    {
+      ct <- cor.test(pdsi, Qa)
+      list(rho = ct$estimate, p.value = ct$p.value)
+    },
+    by = .(ID, point)
+  ][, point := as.numeric(point) # melt() returns factor for variable so this is ok
+  ][mada2xy, on = 'point'
+  ][instQmeta[, .(ID, river, name, long, lat)], on = 'ID', nomatch = NULL]
+setnames(subCor, c('i.long', 'i.lat'), c('Qlong', 'Qlat'))
+
+subCor[, name := factor(name, levels = instQmeta[s2, name])]
+
+## Determine significance
+subCor[, signif := p.value < 0.05]
+## Determine the boundaries of the significance area. 
+## This is done with the signif_area() function
+setkey(subCor, long, lat)
+subCorSignif <- subCor[, signif_area(.SD, 1, 1), by = .(ID, name)]
+
+# Determine the search area for two values of kwf
+inputPoints <- 
+  lapplyrbind(s2, function(s) 
+    lapplyrbind(kwfNames[2:3], function(kwfMax) 
+      data.table(point = madaPoints[[s]][[kwfMax]]),
+      id = 'kwf'),
+    id = 'ID'
+  )[instQmeta[, .(ID, name)], on = 'ID', nomatch = NULL
+  ][mada2xy, on = 'point', nomatch = NULL]
+# Plots
+inputPoints[, kwf := paste0('d[KWF] == ', kwf)]
+inputPoints[, name := factor(name, levels = instQmeta[s2, name])]
+# Coordindates of the two selected stations, for plotting
+sxy <- instQmeta[s2][, name := factor(name, levels = instQmeta[s2, name])]
+```
+
+We're now ready to reproduce **Figure 3**.
+
+```{r, fig.width=8.5, fig.height=5}
+selectedPointPlot <- ggplot(inputPoints, aes(long, lat)) +
+  geom_tile(data = mada2xy, width = 1, height = 1, fill = 'gray') +
+  geom_tile(fill = '#4daf4a', width = 1, height = 1) +
+  geom_point(data = sxy, colour = 'red') +
+  scale_x_continuous(expand = c(0, 0), labels = pasteLong) +
+  scale_y_continuous(expand = c(0, 0), position = 'right') +
+  coord_quickmap() +
+  facet_grid(name ~ kwf, switch = 'y',
+             labeller = labeller(kwf = label_parsed)) +
+  theme_bw() +
+  theme(axis.ticks.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.line = element_blank(),
+        axis.title = element_blank(),
+        strip.background = element_blank(),
+        panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  labs(title = 'Selected MADA grid points')
+
+corPlot <- ggplot(subCor) +
+  geom_raster(aes(long, lat, fill = rho)) +
+  geom_segment(aes(x = long - 0.5, xend = long + 0.5, y = lat + 0.5, yend = lat + 0.5),
+               subCorSignif[{top}], size = 0.1) +
+  geom_segment(aes(x = long - 0.5, xend = long + 0.5, y = lat - 0.5, yend = lat - 0.5),
+               subCorSignif[{bottom}], size = 0.1) +
+  geom_segment(aes(x = long - 0.5, xend = long - 0.5, y = lat - 0.5, yend = lat + 0.5),
+               subCorSignif[{left}], size = 0.1) +
+  geom_segment(aes(x = long + 0.5, xend = long + 0.5, y = lat - 0.5, yend = lat + 0.5),
+               subCorSignif[{right}], size = 0.1) +
+  geom_point(aes(Qlong, Qlat), colour = 'red') +
+  scale_x_continuous(expand = c(0, 0), labels = pasteLong) +
+  scale_y_continuous(expand = c(0, 0), labels = pasteLat) +
+  scale_fill_distiller(name = 'Correlation', palette = 'RdBu', direction = 1, 
+                       breaks = scales::pretty_breaks(3), limits = absRange(subCor$rho)) +
+  coord_quickmap() +
+  labs(x = NULL, y = NULL) +
+  facet_wrap(~name, ncol = 1, strip.position = 'right') +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.line = element_blank(),
+        legend.position = 'top',
+        legend.key.width = unit(0.6, 'cm'),
+        strip.background = element_blank())
+
+# Merge the plots and annotate
+searchAreaPlot <- plot_grid(selectedPointPlot, corPlot, 
+                            ncol = 2, align = 'hv', axis = 'trbl', rel_widths = c(1.75, 1),
+                            labels = c('a)', 'b)'), label_size = 10)
+ggdraw(searchAreaPlot) +
+  draw_label('(Godavari)',     0.62, 0.650, size = 10, angle = 90) +
+  draw_label('(Chao Phraya)', 0.62, 0.250, size = 10, angle = 90)
+```
+
+### Weighted Principal Component Analysis
+
+We need to calculate the correlation between each grid cell and each station. The result is a correlation matrix, each row is a station and each column is a MADA grid point.
+
+```{r}
+corMat <- 
+  instQ[, 
+        {
+          ind <- which(1200:2012 %in% year)
+          as.data.frame(cor(Qa, mada2mat[ind, ], use = 'complete.obs'))
+        },
+        keyby = ID] %>% 
+  as.matrix(rownames = TRUE)
+```
+
+Next, we do weighted PCA. This takes about 30 seconds.
+
+```{r, eval=FALSE}
+pca <- 
+  foreach(s = availIDs, .final = function(x) setNames(x, availIDs)) %:% 
+    foreach(kwfMax = kwfNames, .final = function(x) setNames(x, kwfNames)) %dopar% {
+      points <- madaPoints[[s]][[kwfMax]]
+      X <- mada2mat[, points]
+      rho <- corMat[s, points]
+      lapply(pRange, function(p) {
+        pcaModel <- wPCA(X, rho, p)
+        get_PCs(pcaModel)
+      })
+    }
+```
+
+The previous step gives us a 30-member ensemble from 5 KWF distance and 6 PCA weights. You can type `View(pca)` to see the results. Each ensemble member contains a set of weighted PCs.
+
+Next, use the VSURF algorithm to select a subset of principal components for each ensemble. This code will take about 20 minutes, so get yourself a drink while it runs. Or skip the next two chunks and read the pre-computed results.
+
+```{r, eval=FALSE}
+ivs <- 
+  foreach(s = availIDs, 
+          .packages = 'data.table',
+          .final = function(x) setNames(x, availIDs)) %:%
+    foreach(kwfMax = kwfNames,
+            .final = function(x) setNames(x, kwfNames)) %:%
+      foreach(p = pNames,
+              .final = function(x) setNames(x, pNames)) %dopar% {
+        Qa <- instQ[s][!is.na(Qa)]
+        idx <- which(1200:2012 %in% Qa$year)
+        input_selection(pca[[s]][[kwfMax]][[p]][idx], Qa$Qa, 
+                        nvmax = 8, method = 'VSURF', parallel = FALSE)
+      }
+```
+
+Finally, we combine `pca` and `ivs` to have an ensemble of selected PCs. 
+
+```{r, eval=FALSE}
+ensemblePCs <- 
+  lapply(stationIDs, function(s) 
+    lapply(kwfNames, function(kwfMax) 
+      lapply(pNames, function(p) {
+        sv <- ivs[[s]][[kwfMax]][[p]]
+        pca[[s]][[kwfMax]][[p]][, ..sv]  
+      })))
+```
+
+If you skipped the computations above, you can read the pre-computed weight PCA ensembles here.
+
+```{r}
+ensemblePCs <- readRDS('results/ensemble_selected_PCs.RDS')
+```
+
+## Cross-validation with LDS model
+
+This cross-validation step is also a tuning step. We cross-validate all ensemble members and select one that has the highest mean KGE.
+
+We will also check ensemble averaged models where we average over all p, over all kwf distances, and over both p and kwf. 
+
+Before we start, we need to make the cross-validation folds. We give each station its own random seed so that it's easier to replicate each station individually.
+
+```{r make CV folds}
+# Code runs for available stations
+cvPoints <- lapply(split(instQ, by = 'ID'), function(DT) {
+  seed <- as.integer(substr(DT$ID[1], 7, 10))
+  set.seed(seed)
+  make_Z(DT$Qa, frac = 0.25, nRuns = 30, contiguous = TRUE)  
+})
+# Pre-computed for all stations
+cvPoints <- readRDS('data/cvPoints_indiv_seed.RDS')
+```
+
+We also need to determine whether streamflow needs to be log-transformed for each station.
+
+```{r}
+# Code run for available stations
+trans <- instQ[, .(trans = ifelse(abs(hinkley(log(Qa))) < abs(hinkley(Qa)), 'log', 'none')), 
+               by = ID]
+# Pre-computed results for all stations
+trans <- fread('data/transform_type.csv', key = 'ID')
+```
+
+The cross-validation procedure is provided in a standalone script named `cross_validation.R`. You can use `source('cross_validation.R)` to run it. If you use RStudio, you can submit it as a local job as well. But we recommend to run it on a server or a cluster, as this code takes many hours to run (it took me 18 hours on a 48-core virtual machine). You can also reduce `num.restarts` to get results faster (setting `num.restarts = 20` will get almost as good but reduces the time five-folds). The script will produce the file `results/ensemble_cv_rerun.RDS`, and you can read that file to compare it with the pre-computed `results/ensemble_cv.RDS`.
+
+Each cross-validation run produces the streamflow prediction for one combination of KWF distance, PCA weight, and hold-out chunk. We now read the results and calculate the performance scores for each run.
+
+```{r score distribution, eval=FALSE}
+# Calculate scores for available stations
+cvPoints <- readRDS('data/cvPoints_indiv_seed.RDS')
+Ycv <- readRDS('results/ensemble_cv.RDS')
+scoreDist <- Ycv[availIDs, {
+  s <- .BY$ID
+  r <- .BY$rep
+  transform <- trans[s, trans]
+  Qback <- if (transform == 'log') exp(Q) else Q
+  Qa <- instQ[s, Qa]
+  z <- cvPoints[[s]][[r]]
+  metrics <- calculate_metrics(Qback, Qa, z)
+  data.table(metric = names(metrics), value = metrics)
+}, by = .(ID, kwf, p, rep)]
+```
+
+# Results
+
+## Performance scores
+
+### Mean scores
+
+In the next code chunk, we'll do the followings:
+
+* Read the pre-computed score distribution for all stations
+* Calculate the arithmetic and robust means of each metric
+* Select the best ensemble member by minimizing the Euclidean distance between (CE, KGE) and (1, 1), i.e, the Utopia distance. CE and KGE refers to the robust mean of each metric.
+
+```{r}
+# Read cross-validation outputs
+scoreDist <- readRDS('results/ensemble_scores.RDS')
+# Calculate arithmetic and robust means
+scoreMeans <- scoreDist[, .(rm = dplR::tbrm(value),
+                            am = mean(value)),
+                        by = .(ID, kwf, p, metric)
+                      ][, dcast(.SD, ID + kwf + p ~ metric, value.var = c('rm', 'am'))]
+metricNames <- c('R2', 'RE', 'CE', 'nRMSE', 'KGE')
+setnames(scoreMeans, paste0('rm_', metricNames), metricNames)
+# Calculate Utopia distance
+scoreMeans[, dU := distance(c(CE, KGE), c(1, 1)), by = .(ID, kwf, p)]
+setkey(scoreMeans, ID)
+# Select the best model based on Utopia distance
+ldsChoice <- scoreMeans[, .SD[which.min(dU)], keyby = ID]
+
+# Extract selected metrics
+sm <- c('RE', 'CE', 'KGE')
+choiceDist <- scoreDist[ldsChoice[, .(ID, kwf, p)], on = c('ID', 'kwf', 'p')]
+score_pval <- choiceDist[metric %in% sm, .(p.value = {
+  bm <- if (metric == 'KGE') 1 - sqrt(2) else 0
+  .SD[value <= bm, .N] / .N
+}), by = .(ID, metric)]
+choiceMean <- melt(ldsChoice[, -'dU'], 
+                   id.vars = c('ID', 'kwf', 'p'), 
+                   variable.name = 'metric')
+choiceMean[, type := fifelse(metric %like% 'am', 'Arithmetic', 'Robust')]
+choiceMean[type == 'Arithmetic', metric := substr(metric, 4, 9)]
+```
+
+### Score map
+
+**Figure 4**
+
+```{r, fig.width=8, fig.height=5}
+scoreDT <- ldsChoice[instQmeta]
+g1 <- metric_map(scoreDT, 'RE', numClasses = 9, bgMap = bgMap, maxCount = 15,
+                 dotSize = 1,
+                 histPosition = 'bottom', histBarDirection = 'vertical')
+g2 <- metric_map(scoreDT, 'CE', numClasses = c(1, 9), bgMap = bgMap, maxCount = 15, 
+                 dotSize = 1,
+                 histPosition = 'bottom', histBarDirection = 'vertical')
+g3 <- metric_map(scoreDT, 'KGE', numClasses = 9, bgMap = bgMap, maxCount = 15, 
+                 dotSize = 1,
+                 histPosition = 'bottom', histBarDirection = 'vertical')
+p1 <- g1[[1]] + theme(plot.tag.position = c(0.16, 0.98),
+                      plot.margin = margin(t = 0.1, r = 0.1, b = 0.1, l = 0.1, unit = 'cm'))
+p2 <- g1[[2]] + theme(plot.tag.position = c(0.16, 1.15),
+                      plot.margin = margin(t = 1, r = 0.1, b = 0.1, l = 0.1, unit = 'cm'))
+p3 <- g2[[1]] + theme(plot.tag.position = c(-0.03, 0.98),
+                      axis.text.y = element_blank())
+p4 <- g2[[2]] + theme(plot.tag.position = c(-0.03, 1.15),
+                      plot.margin = margin(t = 1, r = 0.1, b = 0.1, l = 0.5, unit = 'cm'),
+                      axis.text.y = element_blank(), 
+                      axis.title.y = element_blank())
+p5 <- g3[[1]] + theme(plot.tag.position = c(-0.03, 0.98),
+                      plot.margin = margin(t = 0.1, r = 0.1, b = 0.1, l = 0.5, unit = 'cm'),
+                      axis.text.y = element_blank())
+p6 <- g3[[2]] + theme(plot.tag.position = c(-0.03, 1.15),
+                      plot.margin = margin(t = 1, r = 0.1, b = 0.1, l = 0.5, unit = 'cm'),
+                      axis.text.y = element_blank(), 
+                      axis.title.y = element_blank())
+p1 + p2 + p3 + p4 + p5 + p6 +
+  plot_layout(byrow = FALSE, ncol = 3, heights = c(1, 0.75)) +
+  plot_annotation(tag_levels = 'a', tag_suffix = ')') &
+  theme(plot.tag = element_text(size = 12, face = 'bold'))
+```
+
+### Score box plots
+
+**Figure S9**
+
+```{r, fig.width=9, fig.height=8}
+bar <- data.table(metric = factor(sm, levels = sm),
+                  yin = c(0, 0, 1-sqrt(2)))
+DT <- merge(choiceDist, score_pval, by = c('ID', 'metric'))
+DT[, metric := factor(metric, levels = sm)]
+DT <- merge(DT, instQmeta[, .(ID, region)], by = 'ID')
+trimmedIDs <- instQmeta[order(code), trim_ID(ID)]
+DT[, ID := factor(trim_ID(ID), levels = trimmedIDs)]
+choiceMeanDT <- copy(choiceMean)[, ID := factor(trim_ID(ID), levels = trimmedIDs)]
+ggplot(DT) +
+  geom_boxplot(aes(ID, value, colour = p.value <= 0.1), size = 0.5,
+               outlier.colour = NULL, outlier.size = 0.4) +
+  scale_colour_manual(values = c('gray', 'black'),
+                      name = 'Statistically\nskillful') +
+  ggnewscale::new_scale_colour() +
+  geom_hline(aes(yintercept = yin), bar, colour = 'maroon') +
+  geom_rect(aes(xmin = stt, xmax = end, ymin = -Inf, ymax = Inf,
+                fill = region), regionCount, alpha = 0.5) +
+  scale_fill_manual(name = 'Region', values = regionFillPal) +
+  geom_point(aes(ID, value, colour = type), choiceMeanDT[metric %in% sm]) + 
+  scale_colour_manual(name = 'Mean type', values = c('steelblue', 'darkorange')) +
+  facet_wrap(vars(metric), scales = 'free_y', ncol = 1) +
+  labs(x = NULL, y = 'Metric value') +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        strip.text = element_text(face = 'bold'),
+        panel.grid = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 9),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, size = 7))
+```
+
+## Streamflow history
+
+### Build reconstructions
+
+We now build the full reconstruction using the selected models. This code takes about 30 seconds (depending on your computer), and will give you reconstruction results for all 30 available stations. To get results for all stations, skip to the next chunk to read the pre-computed results.
+
+```{r ldsFit, eval=FALSE}
+ldsFit <- 
+  foreach(s = availIDs, 
+          .packages = c('data.table', 'ldsr'),
+          .final = function(x) setNames(x, availIDs)) %dopar% {
+    Qa     <- instQ[s]
+    p      <- ldsChoice[s, p]
+    kwfMax <- ldsChoice[s, kwf]
+    u <- t(ensemblePCs[[s]][[kwfMax]][[p]])
+    transform = trans[s, trans]
+    LDS_reconstruction(Qa, u, u, 1200, transform = transform, 
+                       num.restarts = 100, return.raw = TRUE)
+}
+```
+
+```{r}
+ldsFit <- readRDS('results/ldsFit.RDS')
+```
+
+We can also create the full 30-member ensembles using the following code, which takes more than an hour. It's better to run this on a server.
+
+As always, we provided pre-computed results for all stations, in the file `results/ensemble_reconst.RDS`.
+
+```{r ldsFitFull, eval=FALSE}
+ldsFitFull <- 
+  foreach(s = stationIDs, 
+          .packages = c('data.table', 'ldsr'),
+          .final = function(x) setNames(x, stationIDs)) %:%
+    foreach(kwfMax = kwfNames,
+            .final = function(x) setNames(x, kwfNames)) %:%
+      foreach(p = pNames,
+              .final = function(x) setNames(x, pNames)) %dopar% {
+        Qa     <- instQ[s]
+        u <- t(ensemblePCs[[s]][[kwfMax]][[p]])
+        transform = trans[s, trans]
+        LDS_reconstruction(Qa, u, u, 1200, transform = transform, 
+                           num.restarts = 100, return.raw = TRUE)
+              }
+ensembleRec <- lapplyrbind(ldsFitFull, lapplyrbind, lapplyrbind, '[[', 'rec')
+colnames(ensembleRec)[1:3] <- c('ID', 'kwf', 'p')
+ensembleRec[, c('Xl', 'Xu', 'Ql', 'Qu') := NULL]
+setkey(ensembleRec, ID)
+# Use RDS format to save space as it is compressed
+saveRDS(ensembleRec, 'results/ensemble_reconst_rerun.RDS')
+```
+
+### Streamflow history plots
+
+Now let's plot the reconstructed flow history (Figure 5). The plot function is provided in `R/flow_history.R` We need to calculate the standardize streamflow index by normalizing reconstructed flow with the observed mean and standard deviation (with log-transformation when necessary). The normalization constants are provided in `data/instQsummary.csv`.
+
+```{r}
+instQsummary <- fread('data/instQsummary.csv', key = 'ID')
+ldsFit <- readRDS('results/ldsFit.RDS')
+ldsRec <- lapplyrbind(ldsFit, '[[', 'rec', id = 'ID')
+ldsRec2 <- lapplyrbind(ldsFit, '[[', 'rec2', id = 'ID')
+setkey(ldsRec, ID)
+setkey(ldsRec2, ID)
+```
+
+```{r}
+fh <- flow_history(ldsRec, instQmeta, trans, 
+                   plotGap = TRUE,
+                   stdType = 'inst', instSummary = instQsummary)
+fhGrob <- patchworkGrob(fh)
+fhWrap <- ggdraw(fhGrob)
+yLine <- c(0.3539, 0.4860)
+yText <- 0.375
+```
+
+```{r, fig.width=8.5, fig.height=5}
+fhAnnotated <- fhWrap +
+  draw_line(c(0.0730, 0.1370), yLine, colour = 'steelblue', size = 0.2) + #1
+  draw_line(c(0.0970, 0.1380), yLine, colour = 'steelblue', size = 0.2) + #1
+  draw_line(c(0.1180, 0.2360), yLine, colour = 'steelblue', size = 0.2) + #2
+  draw_line(c(0.3685, 0.2690), yLine, colour = 'steelblue', size = 0.2) + #2
+  draw_line(c(0.3890, 0.2975), yLine, colour = 'steelblue', size = 0.2) + #3
+  draw_line(c(0.5925, 0.3245), yLine, colour = 'steelblue', size = 0.2) + #3
+  draw_line(c(0.6120, 0.3545), yLine, colour = 'steelblue', size = 0.2) + #4
+  draw_line(c(0.6361, 0.3560), yLine, colour = 'steelblue', size = 0.2) + #4
+  draw_line(c(0.6575, 0.5625), yLine, colour = 'steelblue', size = 0.2) + #5
+  draw_line(c(0.6892, 0.5664), yLine, colour = 'steelblue', size = 0.2) + #5
+  draw_line(c(0.7100, 0.6950), yLine, colour = 'steelblue', size = 0.2) + #6
+  draw_line(c(0.8150, 0.7085), yLine, colour = 'steelblue', size = 0.2) + #6
+  draw_line(c(0.8355, 0.7325), yLine, colour = 'steelblue', size = 0.2) + #7
+  draw_line(c(0.8925, 0.7392), yLine, colour = 'steelblue', size = 0.2) + #7
+  draw_line(c(0.9128, 0.7610), yLine, colour = 'steelblue', size = 0.2) + #8
+  draw_line(c(0.9371, 0.7625), yLine, colour = 'steelblue', size = 0.2) + #8
+  draw_line(c(0.9575, 0.8290), yLine, colour = 'steelblue', size = 0.2) + #9
+  draw_line(c(0.9820, 0.8308), yLine, colour = 'steelblue', size = 0.2) + #9
+  draw_text(paste0('(', 1:9, ')'),
+            c(0.090, 0.244, 0.490, 0.623, 0.674, 0.767, 0.863, 0.921, 0.965),
+            yText, size = 9) +
+  draw_text(c('a)', 'b)'), 0.03, c(0.95, 0.4), size = 11, fontface = 'bold')
+fhAnnotated
+```
+
+Zoom in to the instrumental period (Figure S5a).
+
+```{r, fig.width=8, fig.height=4}
+flow_history(ldsRec, instQmeta, trans, 
+             stdType = 'inst', instSummary = instQsummary,
+             startYear = 1950,
+             plotLower = FALSE, plotSegments = FALSE,
+             breaks = seq(1950, 2010, 10))
+```
+
+Time series in the instrumental period (**Figure S6** with Mekong and Yangtze replaced).
+
+```{r, fig.width=8, fig.height=5}
+DT <- merge(ldsRec2[s2b], instQ[s2b], by = c('ID', 'year'))
+ggplot(DT) +
+  geom_ribbon(aes(year, ymin = Ql, ymax = Qu, fill = '95% Confidence Interval'), 
+              alpha = 0.25) +
+  geom_line(aes(year, Q, colour = 'Reconstruction')) +
+  geom_line(aes(year, Qa, colour = 'Observation')) +
+  facet_wrap(vars(ID), ncol = 2, scales = 'free', labeller = as_labeller(ID_to_name_basin)) +
+  scale_colour_manual(name = NULL, values = c('darkorange', 'black')) +
+  scale_fill_manual(name = NULL, values = 'gray') +
+  scale_x_continuous(breaks = seq(1960, 2010, 10)) +
+  labs(x = NULL, y = 'Mean annual flow [m\u00b3/s]') +
+  theme(legend.position = 'top',
+        legend.key.width = unit(1.5, 'cm'))
+```
+
+Time series for full reconstructions (**Figure S7**).
+
+```{r flow history time series, fig.width=8, fig.height=8}
+lp <- copy(ldsRec2[s4])[, lp := dplR::pass.filt(Q, 20, 'low', 'Butterworth')]
+lp[, ID := factor(ID, levels = c('IN_0000061', 'TH_0000178', 'TH_0000156', 'CN_0000192'))]
+ggplot() +
+  geom_rect(aes(xmin = firstYear, xmax = finalYear, ymin = -Inf, ymax = Inf), megadroughts,
+            fill = 'darkorange', alpha = 0.2) +
+  geom_hline(aes(yintercept = Qm, colour = 'Long term mean'), 
+             lp[, .(Qm = mean(Q)), by = ID]) +
+  geom_line(aes(year, Q, colour = 'Reconstruction'), lp, size = 0.2) +
+  geom_line(aes(year, lp, colour = '20-yr low pass'),
+            lp[, .SD[5:(.N-5)], by = ID], size = 0.5) +
+  facet_wrap(vars(ID), ncol = 1, scales = 'free_y', 
+             labeller = as_labeller(ID_to_name_basin)) +
+  labs(x = NULL, y = 'Q [m\u00b3/s]') +
+  scale_x_continuous(breaks = seq(1200, 2000, 50), expand = c(0, 10)) +
+  scale_colour_manual(name = NULL, values = c('black', 'maroon', 'gray70')) +
+  theme(legend.position = 'top', 
+        legend.key.width = unit(2, 'cm'))
+```
+
+Now we plot the full ensemble for some stations (in gray) compared with the best member that we chose above (in blue).
+
+```{r, fig.width=8, fig.height=9}
+ensembleRec <- readRDS('results/ensemble_reconst.RDS')
+ggplot(ensembleRec[s4]) +
+  geom_line(aes(year, Q, group = interaction(kwf, p)), colour = 'gray85') +
+  geom_line(aes(year, Q), ldsRec[s4], colour = 'steelblue') +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  facet_wrap(vars(ID), ncol = 1, scales = 'free_y', 
+             labeller = as_labeller(ID_to_name),
+             strip.position = 'right') +
+  labs(x = NULL, y = 'Q [m\u00b3/s]')
+```
+
+### Cross-correlations of all stations
+
+**Figure S8**, but with unavailable stations masked out.
+
+```{r, fig.width=9, fig.height=7.8}
+# Correlations in instrumental data
+trimmedIDs <- trim_ID(instQmeta[order(code), ID])
+instCorMat <- instQ[, dcast(.SD, year ~ ID, value.var = 'Qa')
+                  ][, cor(.SD, use = 'pairwise.complete'), .SDcols = -1]
+instCor <- data.table(instCorMat, keep.rownames = 'ID1') %>% 
+  melt(id.var = 'ID1', variable.name = 'ID2', value.name = 'rho', variable.factor = FALSE)
+instCor[, c('ID1', 'ID2') := lapply(.SD, function(x) factor(trim_ID(x), levels = trimmedIDs)),
+        .SDcols = c('ID1', 'ID2')]
+instCor <- instCor[as.numeric(ID1) < as.numeric(ID2)]
+
+# Corelations in reconstructions
+# Where instrumental data are available, use the same years as instrumental data
+# Otherwise, use a nominal period 1950:2012
+recCorMat <- rbind(ldsRec[instQ[, .(ID, year)], on = c('ID', 'year')],
+                   ldsRec[!instQ][year %in% 1950:2012]
+                  )[, dcast(.SD, year ~ ID, value.var = 'Q')
+                  ][, cor(.SD, use = 'pairwise.complete'), .SDcols = -1]
+recCor <- data.table(recCorMat, keep.rownames = 'ID1') %>% 
+  melt(id.var = 'ID1', variable.name = 'ID2', value.name = 'rho', variable.factor = FALSE)
+recCor[, c('ID1', 'ID2') := lapply(.SD, function(x) factor(trim_ID(x), levels = trimmedIDs)),
+        .SDcols = c('ID1', 'ID2')]
+recCor <- recCor[as.numeric(ID1) > as.numeric(ID2)]
+
+limits <- absRange(c(instCor$rho, recCor$rho))
+DT <- rbind(instCor, recCor)
+ggplot(DT) +
+  geom_tile(aes(ID1, ID2, fill = rho)) +
+  geom_line(aes(x, y), data.table(x = c(0.5, 62.5), y = c(0.5, 62.5)), 
+            size = 1.5, lineend = 'round') +
+  geom_linerange(aes(y = stt, xmin = 0.5, xmax = 62.5), regionCount[-1], size = 0.1) +
+  geom_linerange(aes(x = stt, ymin = 0.5, ymax = 62.5), regionCount[-1], size = 0.1) +
+  geom_text(aes(mid, 63.5, label = region), regionCount, size = 3.5) +
+  geom_text(aes(63, mid, label = region), regionCount, size = 3.5, hjust = 0) +
+  coord_equal() +
+  scale_x_discrete(limits = c(trimmedIDs, ' ', ' ', ' ')) +
+  scale_y_discrete(limits = c(trimmedIDs, ' ', ' ')) +
+  scale_fill_distiller(name = 'Correlation', palette = 'RdBu', direction = 1, 
+                       breaks = seq(-0.8, 0.8, 0.2), limits = limits) +
+  labs(x = NULL, y = NULL) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 7),
+        axis.text.y = element_text(vjust = 0.5, size = 7),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        legend.key.height = unit(2, 'cm'))
+```
+
+### Volcanic eruptions
+
+**Figure S10**
+
+```{r, fig.width=8, fig.height=6}
+volcano0 <- ldsRec[, .(year, Y = {
+                    s <- .BY
+                    tf <- trans[s, trans]
+                    Y <- if (tf == 'log') log(Q) else Q
+                    standardize(Y)
+                  }), keyby = ID
+                ][year %in% c(1257, 1452, 1815)
+                ][, event := fifelse(year == 1257, 'Samalas', 
+                                     fifelse(year == 1452, 'Kuwae', 'Tambora'))
+                ][, event := factor(event, levels = c('Samalas', 'Kuwae', 'Tambora'))
+                ][instQmeta
+                ][, region := factor(region, levels = c('CA', 'EA', 'CN', 'WA', 'SEA', 'SA'))]
+volcano1 <- ldsRec[, .(year, Y = {
+                    s <- .BY
+                    tf <- trans[s, trans]
+                    Y <- if (tf == 'log') log(Q) else Q
+                    standardize(Y)
+                  }), keyby = ID
+                ][year %in% c(1258, 1453, 1816)
+                ][, event := fifelse(year == 1258, 'Samalas', 
+                                     fifelse(year == 1453, 'Kuwae', 'Tambora'))
+                ][, event := factor(event, levels = c('Samalas', 'Kuwae', 'Tambora'))
+                ][instQmeta
+                ][, region := factor(region, levels = c('CA', 'EA', 'CN', 'WA', 'SEA', 'SA'))]
+
+p1 <- ggplot(volcano0, aes(event, Y)) +
+  geom_hline(yintercept = 0, colour = 'gray', size = 0.2) +
+  geom_boxplot(aes(fill = region), size = 0.2, varwidth = TRUE) +
+  facet_wrap(vars(region)) +
+  scale_fill_manual(name = 'Region', values = regionFillPal) +
+  labs(x = NULL, y = 'Standardized streamflow [-]', title = 'a) Year t') +
+  theme(legend.position = 'none',
+        panel.background = element_rect(NA, 'black', size = 0.1),
+        panel.spacing.x = unit(0, 'pt'))
+p2 <- ggplot(volcano1, aes(event, Y)) +
+  geom_hline(yintercept = 0, colour = 'gray', size = 0.2) +
+  geom_boxplot(aes(fill = region), size = 0.2, varwidth = TRUE) +
+  facet_wrap(vars(region)) +
+  scale_fill_manual(name = 'Region', values = regionFillPal) +
+  labs(x = NULL, y = 'Standardized streamflow [-]', title = 'b) Year t + 1') +
+  theme(legend.position = 'none',
+        panel.background = element_rect(NA, 'black', size = 0.1),
+        panel.spacing.x = unit(0, 'pt'))
+p1 / p2
+```
+
+## Oceanic teleconnections
+
+### Main correlation map
+
+**Figure 6**
+
+```{r corQSST selected four, eval=FALSE}
+selectedIDs <- c('TH_0000156', 'IN_0000061', 'CN_0000192', 'TH_0000178')
+outlets <- ldsRec[ID %in% selectedIDs & year %in% 1856:2012, .(ID, year, Q)]
+outlets[trans[selectedIDs][trans == 'log', ID], Q := log(Q)]
+
+DT <- merge(sst, outlets, by = 'year', allow.cartesian = TRUE)
+
+corQSST <- DT[, {
+  ct <- cor.test(Q, sst, alternative = 'two.sided')
+  list(rho = ct$estimate, p.value = ct$p.value)
+}, by = .(point, season, ID)]
+
+saveRDS(corQSST, 'results/corQSST_selected_four_rerun.RDS')
+```
+
+
+```{r, fig.width=8, fig.height=7}
+# Read correlation results
+corQSST <- readRDS('results/corQSST_selected_four.RDS')
+corQSST <- merge(corQSST, sstxy, by = 'point')
+setkey(corQSST, long, lat)
+corQSST[, river := ID_to_basin(ID)]
+corQSST[, river := factor(river, 
+                          levels = c('Godavari', 'Chao Phraya', 'Mekong', 'Yangtze'))]
+corQSST[, signif := p.value < 0.05]
+signifQSST <- corQSST[, signif_area(.SD, 2, 2), by = .(season, river)]
+
+# Plot correlation map
+sstCorPlot <- plot_sst_cor(corQSST, signifQSST, sstLand) +
+  theme(strip.background = element_blank(),
+        strip.text.y = element_text(face = 'plain'),
+        axis.line = element_blank(),
+        panel.border = element_rect(NA, 'gray60', size = 0.1),
+        legend.key.height = unit(0.4, 'cm'),
+        legend.title = element_text(size = 10)) 
+
+# Plot basin boundaries and river networks
+## Basin boundary data
+gd <- sf::st_read('data/geo/Godavari.gpkg', quiet = TRUE)
+cp <- sf::st_read('data/geo/ChaoPhraya.gpkg', quiet = TRUE)
+mk <- sf::st_read('data/geo/Mekong.gpkg', quiet = TRUE)
+yt <- sf::st_read('data/geo/Yangtze.gpkg', quiet = TRUE)
+## River network data
+gdRiver <- sf::st_read('data/geo/Godavari_main.gpkg', quiet = TRUE)
+cpRiver <- sf::st_read('data/geo/ChaoPhraya_main.gpkg', quiet = TRUE)
+mkRiver <- sf::st_read('data/geo/Mekong_main.gpkg', quiet = TRUE)
+ytRiver <- sf::st_read('data/geo/Yangtze_main.gpkg', quiet = TRUE)
+## Individual basin maps
+gdMap <- ggplot() + 
+  geom_sf(data = gd, fill = 'gray95', size = 0.1) + 
+  geom_sf(aes(colour = log(qav_av_dw)), gdRiver, 
+          size = 0.1, lineend = 'round', show.legend = FALSE) +
+  scale_colour_distiller(palette = 'Blues', direction = 1) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  geom_point(aes(long, lat), instQmeta['IN_0000061'], colour = 'firebrick3') + 
+  theme_map()
+cpMap <- ggplot() + 
+  geom_sf(data = cp, fill = 'gray95', size = 0.1) + 
+  geom_sf(aes(colour = log(qav_av_dw)), cpRiver,
+          size = 0.1, lineend = 'round', show.legend = FALSE) +
+  scale_colour_distiller(palette = 'Blues', direction = 1) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  geom_point(aes(long, lat), instQmeta['TH_0000178'], colour = 'firebrick3') + 
+  theme_map()
+mkMap <- ggplot() + 
+  geom_sf(data = mk, fill = 'gray95', size = 0.1) + 
+  geom_sf(aes(colour = log(qav_av_dw)), mkRiver,
+          size = 0.1, lineend = 'round', show.legend = FALSE) +
+  scale_colour_distiller(palette = 'Blues', direction = 1) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  geom_point(aes(long, lat), instQmeta['TH_0000156'], colour = 'firebrick3') + 
+  theme_map()
+ytMap <- ggplot() + 
+  geom_sf(data = yt, fill = 'gray95', size = 0.1) + 
+  geom_sf(aes(colour = log(qav_av_dw)), ytRiver,
+          size = 0.1, lineend = 'round', show.legend = FALSE) +
+  scale_colour_distiller(palette = 'Blues', direction = 1) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  geom_point(aes(long, lat), instQmeta['CN_0000192'], colour = 'firebrick3') + 
+  theme_map()
+# Assemble plots
+layout <- '
+####CCC##
+AABBCCCDD
+AABBCCCDD
+EEEEEEEEE
+EEEEEEEEE
+EEEEEEEEE
+EEEEEEEEE
+EEEEEEEEE
+EEEEEEEEE
+EEEEEEEEE
+EEEEEEEEE
+'
+gdMap + cpMap + mkMap + ytMap + sstCorPlot + plot_layout(design = layout)
+```
+
+### Individual basins
+
+#### Godavari
+
+**Figure S11**
+
+```{r corQSST Godavari, eval=FALSE}
+selectedIDs <- c('IN_0000098', 'IN_0000061')
+outlets <- ldsRec[ID %in% selectedIDs & year %in% 1856:2012, .(ID, year, Q)]
+outlets[trans[selectedIDs][trans == 'log', ID], Q := log(Q)]
+
+DT <- merge(sst, outlets, by = 'year', allow.cartesian = TRUE)
+
+corQSST <- DT[, {
+  ct <- cor.test(Q, sst, alternative = 'two.sided')
+  list(rho = ct$estimate, p.value = ct$p.value)
+}, by = .(point, season, ID)]
+
+saveRDS(corQSST, 'results/corQSST_Godavari_rerun.RDS')
+```
+
+```{r, fig.width=5.5, fig.height=7}
+# Read correlation results
+corQSST <- readRDS('results/corQSST_Godavari.RDS')
+corQSST <- merge(corQSST, sstxy, by = 'point')
+setkey(corQSST, long, lat)
+corQSST[, river := ID_to_name(ID)]
+corQSST[, river := factor(river, levels = c('Perur', 'Polavaram'))]
+# Determine significance
+corQSST[, signif := p.value < 0.05]
+signifQSST <- corQSST[, signif_area(.SD, 2, 2), by = .(season, river)]
+# Correlation map
+sstCorGodavari <- plot_sst_cor(corQSST, signifQSST, sstLand) +
+  theme(strip.background = element_blank(),
+        strip.text.y = element_text(face = 'plain'),
+        axis.line = element_blank(),
+        panel.border = element_rect(NA, 'gray60', size = 0.1),
+        legend.key.width = unit('0.4', 'cm'),
+        legend.key.height = unit(1.5, 'cm'),
+        legend.position = 'right',
+        legend.title = element_text(size = 10))
+
+# Basin map
+## Read geo files
+gd <- sf::st_read('data/geo/Godavari.gpkg', quiet = TRUE)
+gdRiver <- sf::st_read('data/geo/Godavari_main.gpkg', quiet = TRUE)
+## Plot map
+godavari <- ggplot() +
+  geom_sf(data = gd, fill = 'gray95', size = 0.1) +
+  geom_sf(aes(colour = log(qav_av_dw)),
+          data = gdRiver, 
+          size = 0.2,
+          show.legend = FALSE) +
+  scale_colour_distiller(palette = 'Blues', direction = 1) +
+  geom_point(aes(long, lat), instQmeta[c('IN_0000061', 'IN_0000098')], 
+             colour = 'firebrick3') +
+  geom_text(aes(long, lat, label = name), instQmeta[c('IN_0000061', 'IN_0000098')],
+            fontface = 'bold',
+            size = 3,
+            nudge_x = c(0.75, -1.1),
+            nudge_y = c(0, -0.25)) +
+  coord_sf() +
+  theme_map()
+# Assemble plot
+sstCorGodavari + godavari + plot_layout(ncol = 1, heights = c(2, 1))
+```
+
+#### Mekong
+
+```{r corQSST Mekong, eval=FALSE}
+selectedIDs <- c('LA_0000002', 'LA_0000005', 'LA_0000014', 'TH_0000156')
+outlets <- ldsRec[ID %in% selectedIDs & year %in% 1856:2012, .(ID, year, Q)]
+outlets[trans[selectedIDs][trans == 'log', ID], Q := log(Q)]
+
+DT <- merge(sst, outlets, by = 'year', allow.cartesian = TRUE)
+
+corQSST <- DT[, {
+  ct <- cor.test(Q, sst, alternative = 'two.sided')
+  list(rho = ct$estimate, p.value = ct$p.value)
+}, by = .(point, season, ID)]
+
+saveRDS(corQSST, 'results/corQSST_Mekong_rerun.RDS')
+```
+
+**Figure S12**
+
+```{r, fig.width=8, fig.height=9}
+# Read correlation results
+corQSST <- readRDS('results/corQSST_Mekong.RDS')
+corQSST <- merge(corQSST, sstxy, by = 'point')
+setkey(corQSST, long, lat)
+corQSST[, river := ID_to_name(ID)]
+corQSST[, river := factor(river, 
+                          levels = c('Luang Prabang', 'Vientiane', 'Mukdahan', 'Pakse'))]
+# Determine significance
+corQSST[, signif := p.value < 0.05]
+signifQSST <- corQSST[, signif_area(.SD, 2, 2), by = .(season, river)]
+# Correlation map
+sstCorMekong <- plot_sst_cor(corQSST, signifQSST, sstLand) +
+  theme(strip.background = element_blank(),
+        strip.text.y = element_text(face = 'plain'),
+        axis.line = element_blank(),
+        panel.border = element_rect(NA, 'gray60', size = 0.1),
+        legend.position = 'right',
+        legend.key.height = unit(1.5, 'cm'),
+        legend.key.width = unit('0.4', 'cm'),
+        legend.title = element_text(size = 10))
+# Basin map
+## Read geo files
+mkRiver <- sf::st_read('data/geo/Mekong_main.gpkg', quiet = TRUE)
+mk <- sf::st_read('data/geo/Mekong.gpkg', quiet = TRUE)
+## Plot map
+mekong <- ggplot() +
+  geom_sf(data = mk, fill = 'gray95', colour = 'gray60', size = 0.1) +
+  geom_sf(aes(colour = log(qav_av_dw)), 
+          data = mkRiver, 
+          size = 0.1,
+          lineend = 'round') +
+  scale_colour_distiller(palette = 'Blues', direction = 1) +
+  geom_point(aes(long, lat), 
+             instQmeta[c('LA_0000002', 'LA_0000005', 'LA_0000014', 'TH_0000156')], 
+             colour = 'firebrick3') +
+  geom_text(aes(long, lat, label = name),
+            instQmeta[c('LA_0000002', 'LA_0000005', 'LA_0000014', 'TH_0000156')],
+            nudge_x = 0.2, hjust = 0,
+            fontface = 'bold', size = 3) +
+  coord_sf() +
+  theme_map() +
+  theme(legend.position = 'none')
+# Assemble plot
+sstCorMekong + mekong + plot_layout(ncol = 1, heights = c(1, 1))
+```
+
+#### Yangtze
+
+**Figure S13**
+
+```{r corQSST Yangtze, eval=FALSE}
+selectedIDs <- c('CN_0000180', 'CN_0000191', 'CN_0000192')
+outlets <- ldsRec[ID %in% selectedIDs & year %in% 1856:2012, .(ID, year, Q)]
+outlets[trans[selectedIDs][trans == 'log', ID], Q := log(Q)]
+
+DT <- merge(sst, outlets, by = 'year', allow.cartesian = TRUE)
+
+corQSST <- DT[, {
+  ct <- cor.test(Q, sst, alternative = 'two.sided')
+  list(rho = ct$estimate, p.value = ct$p.value)
+}, by = .(point, season, ID)]
+
+saveRDS(corQSST, 'results/corQSST_Yangtze.RDS')
+```
+
+```{r, fig.width=7, fig.height=7}
+# Read correlation results
+corQSST <- readRDS('results/corQSST_Yangtze.RDS')
+corQSST <- merge(corQSST, sstxy, by = 'point')
+setkey(corQSST, long, lat)
+corQSST[, river := ID_to_name(ID)]
+corQSST[, river := factor(river, levels = c('Luoshan', 'Hankou', 'Datong'))]
+# Determine significance
+corQSST[, signif := p.value < 0.05]
+signifQSST <- corQSST[, signif_area(.SD, 2, 2), by = .(season, river)]
+# Plot correlation maps
+sstCorYangtze <- plot_sst_cor(corQSST, signifQSST, sstLand) +
+  theme(strip.background = element_blank(),
+        strip.text.y = element_text(face = 'plain'),
+        axis.line = element_blank(),
+        panel.border = element_rect(NA, 'gray60', size = 0.1),
+        legend.position = 'right',
+        legend.key.height = unit(1.5, 'cm'),
+        legend.key.width = unit('0.4', 'cm'),
+        legend.title = element_text(size = 10))
+# Basin map
+## Read geo files
+ytRiver <- sf::st_read('data/geo/Yangtze_main.gpkg', quiet = TRUE)
+yt <- sf::st_read('data/geo/Yangtze.gpkg', quiet = TRUE)
+## Plot map
+yangtze <- ggplot() +
+  geom_sf(data = yt, fill = 'gray95', colour = 'gray60', size = 0.1) +
+  geom_sf(aes(colour = log(qav_av_dw)), 
+          data = ytRiver, 
+          size = 0.1,
+          lineend = 'round') +
+  scale_colour_distiller(palette = 'Blues', direction = 1) +
+  geom_point(aes(long, lat), 
+             instQmeta[c('CN_0000180', 'CN_0000191', 'CN_0000192')], 
+             colour = 'firebrick3') +
+  geom_text(aes(long, lat, label = name),
+            instQmeta[c('CN_0000180', 'CN_0000191', 'CN_0000192')],
+            fontface = 'bold', size = 3,
+            nudge_x = c(0.2, 0, 0.2),
+            nudge_y = c(0, 0.7, -0.3),
+            hjust = c(0, 0.5, 0)) +
+  coord_sf() +
+  theme_map() +
+  theme(legend.position = 'none')
+# Assemble plot
+sstCorYangtze + yangtze + plot_layout(ncol = 1, heights = c(2, 1))
+```
+
+### Sliding window
+
+To recreate **Movie S1**, you can run this chunk to create individual frames, and stitch them together with any video or gif making tool.
+
+```{r 50yr frame, eval=FALSE}
+corQSST_50_move <- readRDS('results/corQSST_50yr_blocks_moving.RDS') %>% 
+  merge(sstxy, by = 'point')
+corQSST_50_move[, river := ID_to_basin(ID)]
+corQSST_50_move[, signif := p.value < 0.05]
+signifQSST_50_move <- corQSST_50_move[, signif_area(.SD, 2, 2), by = .(season, river, block)]
+sttYears <- seq(1861, 1961, 10)
+limits <- absRange(corQSST_50_move$rho)
+foreach(stt = sttYears, .packages = 'data.table') %dopar% {
+  corDT <- corQSST_50_move[block == stt]
+  sigDT <- signifQSST_50_move[block == stt]
+  blk <- glue('{stt} - {stt + 49}')
+  p <- plot_sst_cor(corDT, sigDT, sstLand, title = blk, limits = limits) +
+    my_theme +
+    theme(strip.background = element_blank(),
+          strip.text = element_text(face = 'plain'),
+          axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          panel.border = element_rect(NA, 'gray60', size = 0.1),
+          legend.position = 'bottom',
+          legend.key.width = unit(2, 'cm'),
+          legend.key.height = unit(0.4, 'cm'),
+          legend.title = element_text(size = 10))
+  ggsave(glue('sst_cor_block_{blk}.png'), p, width = 8, height = 5.2, unit = 'in')
+}
+```
+
+To recreate **Figure 7**, we take three blocks from the instrumental results.
+
+```{r, fig.width=6, fig.height=9}
+corQSST_50_move <- readRDS('results/corQSST_50yr_blocks_moving.RDS') %>% 
+  merge(sstxy, by = 'point')
+corQSST_50_move[, river := ID_to_basin(ID)]
+corQSST_50_move[, signif := p.value < 0.05]
+signifQSST_50_move <- corQSST_50_move[, signif_area(.SD, 2, 2), by = .(season, river, block)]
+p1 <- plot_sst_cor(corQSST_50_move[block == 1861], signifQSST_50_move[block == 1861],
+                   sstLand, title = '1861 - 1911', limits = limits) +
+    theme(strip.background = element_blank(),
+          strip.text.y.left = element_text(face = 'plain', angle = 0, hjust = 1),
+          axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          panel.border = element_rect(NA, 'gray60', size = 0.1),
+          legend.position = 'right',
+          legend.key.height = unit(1.5, 'cm'),
+          legend.key.width = unit(0.4, 'cm'),
+          legend.title = element_text(size = 10))
+p2 <- plot_sst_cor(corQSST_50_move[block == 1911], signifQSST_50_move[block == 1911],
+                   sstLand, title = '1911 - 1960', limits = limits) +
+    theme(strip.background = element_blank(),
+          strip.text.y.left = element_text(face = 'plain', angle = 0, hjust = 1),
+          axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          panel.border = element_rect(NA, 'gray60', size = 0.1),
+          legend.position = 'none')
+p3 <- plot_sst_cor(corQSST_50_move[block == 1961], signifQSST_50_move[block == 1961],
+                   sstLand, title = '1961 - 2010', limits = limits) +
+    theme(strip.background = element_blank(),
+          strip.text.y.left = element_text(face = 'plain', angle = 0, hjust = 1),
+          axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          panel.border = element_rect(NA, 'gray60', size = 0.1),
+          legend.position = 'none')
+p1 / p2 / p3 +
+  plot_layout(guides = 'collect')
+```
+
+
