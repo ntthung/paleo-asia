@@ -1,0 +1,94 @@
+---
+title: "Coherent streamflow variability in Monsoon Asia over the past eight centuries---links to oceanic drivers"
+subtitle: "All time series plots"
+author: "Hung Nguyen, Sean Turner, Brendan Buckley, and Stefano Galelli"
+output: 
+  html_document: 
+    highlight: tango
+    number_sections: yes
+    theme: journal
+    toc: yes
+    toc_float: yes
+    df_print: paged
+---
+
+# Introduction
+
+This document provides all time series plots from the reconstructions. You should read this only after going through the main document (`paleo_asia.Rmd`). Be warned: lots of scrolling here.
+
+
+The following code chunk sets up the environment and reads the data.
+
+```{r setup, message=FALSE, warning=FALSE}
+source('R/init.R')
+
+# Read data
+instQmeta <- fread('data/instQ_meta.csv', key = 'ID') # Streamflow metadata
+instQ <- fread('data/instQ.csv', key = 'ID')          # Instrumental streamflow
+
+ldsFit <- readRDS('results/ldsFit.RDS')
+ldsRec <- lapplyrbind(ldsFit, '[[', 'rec', id = 'ID')
+ldsRec2 <- lapplyrbind(ldsFit, '[[', 'rec2', id = 'ID')
+setkey(ldsRec, ID)
+setkey(ldsRec2, ID)
+```
+
+
+# All instrumetal period comparisons
+
+Like **Figure S6**, but with all stations.
+
+```{r inst plot, fig.width=8, fig.height=24}
+DT <- merge(ldsRec2, instQ, by = c('ID', 'year'))
+ggplot(DT) +
+  geom_ribbon(aes(year, ymin = Ql, ymax = Qu, fill = '95% Confidence Interval'), 
+              alpha = 0.25) +
+  geom_line(aes(year, Q, colour = 'Reconstruction')) +
+  geom_line(aes(year, Qa, colour = 'Observation')) +
+  facet_wrap(vars(ID), ncol = 3, scales = 'free', labeller = as_labeller(ID_to_name_basin)) +
+  scale_colour_manual(name = NULL, values = c('darkorange', 'black')) +
+  scale_fill_manual(name = NULL, values = 'gray') +
+  scale_x_continuous(breaks = seq(1960, 2010, 10)) +
+  labs(x = NULL, y = 'Mean annual flow [m\u00b3/s]') +
+  theme(legend.position = 'top',
+        legend.key.width = unit(1.5, 'cm'))
+```
+
+# Full reconstructions
+
+Time series for full reconstructions (like **Figure S7**, but for all stations).
+
+```{r flow history time series, fig.width=8, fig.height=62}
+lp <- copy(ldsRec)[, lp := dplR::pass.filt(Q, 20, 'low', 'Butterworth')]
+ggplot() +
+  geom_rect(aes(xmin = firstYear, xmax = finalYear, ymin = -Inf, ymax = Inf), megadroughts,
+            fill = 'darkorange', alpha = 0.2) +
+  geom_hline(aes(yintercept = Qm, colour = 'Long term mean'), 
+             lp[, .(Qm = mean(Q)), by = ID]) +
+  geom_line(aes(year, Q, colour = 'Reconstruction'), lp, size = 0.2) +
+  geom_line(aes(year, lp, colour = '20-yr low pass'),
+            lp[, .SD[30:(.N-30)], by = ID], size = 0.5) +
+  facet_wrap(vars(ID), ncol = 1, scales = 'free_y', strip.position = 'right') +
+  labs(x = NULL, y = 'Q [m\u00b3/s]') +
+  scale_x_continuous(breaks = seq(1200, 2000, 50), expand = c(0, 10)) +
+  scale_colour_manual(name = NULL, values = c('black', 'maroon', 'gray70')) +
+  theme(legend.position = 'top', 
+        legend.key.width = unit(2, 'cm'))
+```
+
+# Full ensembles
+
+Now we plot the full ensemble for all sations (in gray) compared with the best member that we chose above (in blue).
+
+```{r ensemble ts plot, fig.width=8, fig.height=62}
+ensembleRec <- readRDS('results/ensemble_reconst.RDS')
+ggplot(ensembleRec) +
+  geom_line(aes(year, Q, group = interaction(kwf, p)), colour = 'gray85') +
+  geom_line(aes(year, Q), ldsRec, colour = 'steelblue') +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  facet_wrap(vars(ID), ncol = 1, scales = 'free_y', 
+             strip.position = 'right') +
+  labs(x = NULL, y = 'Q [m\u00b3/s]')
+```
+
