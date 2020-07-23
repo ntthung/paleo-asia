@@ -6,4 +6,4 @@
 test*.*
 data/instQ_full.csv
 R/background_computations.R
-R/get_full_ensembles.
+R/get_full_ensembles.R
