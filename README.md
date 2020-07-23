@@ -9,4 +9,6 @@ The file `paleo-asia.Rmd` contains all analysis code along with explanations and
 
 If you only need to see the code and results without running, open the file `paleo-asia.html` and view through.
 
-If you have any questions or feedback, please drop me an email, or even better, raise a GitHub issue.
+The final reconstruction results are provided in `R/reconstructions_final.csv` and `R/skill_scores_final.csv`. You can download them if you want to use the reconstruction results for other work.
+
+Please send me an email for questions and feedback. Even better, raise a GitHub issue.
