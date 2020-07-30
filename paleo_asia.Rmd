@@ -93,7 +93,7 @@ remove(sstFull, sst0, sst1)
 bgMap <- sf::st_read('data/geo/mada_coastlines.gpkg', quiet = TRUE)
 ```
 
-There is also the script `R/read-raw-data.R` that is available for inspection. Parts of that code reads the raw data from the GSIM; you can use that part if you have GSIM on your computer.
+There is also the script `R/read_raw_data.R` that is available for inspection. Parts of that code reads the raw data from the GSIM; you can use that part if you have GSIM on your computer.
 
 Some code chunks require parallel computations (those involving `foreach()`). You will need tu run the chunk named `parallel` first to set up the parallel backend.
 
